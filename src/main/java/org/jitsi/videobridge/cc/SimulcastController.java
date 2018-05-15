@@ -276,8 +276,7 @@ public class SimulcastController
         // current layer we're forwarding is still sending, so we're not
         // "desperate"
         int currentBaseLayerIndex;
-        if (currentIndex == SUSPENDED_INDEX ||
-            !sourceEncodings[currentIndex].getBaseLayer().isActive(true))
+        if (currentIndex == SUSPENDED_INDEX)
         {
             currentBaseLayerIndex = SUSPENDED_INDEX;
         }
@@ -304,8 +303,16 @@ public class SimulcastController
         // brings us to (or closer to) the stream we want.
         if (!sourceFrameDesc.isIndependent())
         {
+            maybeRequestKeyFrame();
+
             // If it's not a keyframe we can't switch to it anyway
             return false;
+        }
+
+        if (currentBaseLayerIndex != SUSPENDED_INDEX
+                && !sourceEncodings[currentBaseLayerIndex].isActive())
+        {
+            currentBaseLayerIndex = SUSPENDED_INDEX;
         }
 
         int targetBaseLayerIndex
@@ -342,6 +349,17 @@ public class SimulcastController
             return;
         }
 
+        maybeRequestKeyFrame();
+    }
+
+    private void maybeRequestKeyFrame()
+    {
+        int targetIndex = bitstreamController.getTargetIndex();
+        if (targetIndex < 0)
+        {
+            return;
+        }
+
         // check whether it makes sense to send an FIR or not.
         MediaStreamTrackDesc sourceTrack = weakSource.get();
         if (sourceTrack == null)
@@ -350,6 +368,10 @@ public class SimulcastController
         }
 
         RTPEncodingDesc[] sourceEncodings = sourceTrack.getRTPEncodings();
+        if (sourceEncodings == null || sourceEncodings.length == 0)
+        {
+            return;
+        }
 
         int currentTL0Idx = bitstreamController.getCurrentIndex();
         if (currentTL0Idx > SUSPENDED_INDEX)
@@ -359,55 +381,65 @@ public class SimulcastController
         }
 
         int targetTL0Idx
-            = sourceEncodings[newTargetIdx].getBaseLayer().getIndex();
+            = sourceEncodings[targetIndex].getBaseLayer().getIndex();
 
         // Make sure that something is streaming so that a FIR makes sense.
 
-        boolean sendFIR;
-        if (sourceEncodings[0].isActive(true))
+        if (!sourceEncodings[0].isActive())
         {
-            // Something lower than the current must be streaming, so we're able
-            // to make a switch, so ask for a key frame.
-            sendFIR = targetTL0Idx < currentTL0Idx;
-            if (!sendFIR && targetTL0Idx > currentTL0Idx)
+            return;
+        }
+
+        // Something lower than the current must be streaming, so we're able
+        // to make a switch, so ask for a key frame.
+        boolean sendFIR = targetTL0Idx < currentTL0Idx;
+        if (!sendFIR && targetTL0Idx > currentTL0Idx)
+        {
+            // otherwise, check if anything higher is streaming.
+            for (int i = currentTL0Idx + 1; i < targetTL0Idx + 1; i++)
             {
-                // otherwise, check if anything higher is streaming.
-                for (int i = currentTL0Idx + 1; i < targetTL0Idx + 1; i++)
+                RTPEncodingDesc tl0 = sourceEncodings[i].getBaseLayer();
+                if (tl0.isActive() && tl0.getIndex() > currentTL0Idx)
                 {
-                    RTPEncodingDesc tl0 = sourceEncodings[i].getBaseLayer();
-                    if (tl0.isActive(true) && tl0.getIndex() > currentTL0Idx)
-                    {
-                        sendFIR = true;
-                        break;
-                    }
+                    sendFIR = true;
+                    break;
                 }
             }
         }
-        else
+
+        if (!sendFIR && currentTL0Idx > SUSPENDED_INDEX
+                && !sourceEncodings[currentTL0Idx].isActive())
         {
-            sendFIR = false;
+            sendFIR = true;
+        }
+
+        if (!sendFIR)
+        {
+            return;
         }
 
         MediaStream sourceStream
             = sourceTrack.getMediaStreamTrackReceiver().getStream();
-        if (sendFIR && sourceStream != null)
+        if (sourceStream == null)
         {
-            if (timeSeriesLogger.isTraceEnabled())
-            {
-                DiagnosticContext diagnosticContext
-                    = getDiagnosticContext();
-
-                timeSeriesLogger.trace(diagnosticContext
-                        .makeTimeSeriesPoint("send_fir")
-                        .addField("reason", "target_changed")
-                        .addField("current_tl0", currentTL0Idx)
-                        .addField("target_tl0", targetTL0Idx));
-            }
-
-            ((RTPTranslatorImpl) sourceStream.getRTPTranslator())
-                .getRtcpFeedbackMessageSender().sendFIR(
-                (int) targetSsrc);
+            return;
         }
+
+        if (timeSeriesLogger.isTraceEnabled())
+        {
+            DiagnosticContext diagnosticContext
+                = getDiagnosticContext();
+
+            timeSeriesLogger.trace(diagnosticContext
+                    .makeTimeSeriesPoint("send_fir")
+                    .addField("reason", "target_changed")
+                    .addField("current_tl0", currentTL0Idx)
+                    .addField("target_tl0", targetTL0Idx));
+        }
+
+        ((RTPTranslatorImpl) sourceStream.getRTPTranslator())
+            .getRtcpFeedbackMessageSender().sendFIR(
+                    (int) targetSsrc);
     }
 
     /**
